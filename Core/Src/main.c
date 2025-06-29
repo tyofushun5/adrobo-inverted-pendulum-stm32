@@ -21,7 +21,10 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include <stdio.h>
+#include <stdbool.h>
 
+#include "qei.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -36,7 +39,15 @@
 
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
+#define PI 3.141592
 
+#define PRESCALER (6399 - 1)
+
+#define THETA_REF 0
+#define ADV_TO_RAD 0.0056
+#define MAX_V 7.2
+#define PULSE_TO_METER 0.0005
+#define DT (0.001)
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
@@ -49,7 +60,19 @@ TIM_HandleTypeDef htim6;
 UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
-int test = 0;
+bool start = false;
+
+uint16_t ad;
+uint16_t zero_ad;
+float theta = 0, theta_pre = 0, dtheta = 0;
+float x = 0, x_pre = 0, dx = 0;
+float e = 0, ed = 0, ei = 0, e_pre = 0;                                 //振子の角度
+float v_ref = 0, duty_ratio = 0;                       //電圧指令値　，　デューティー比
+
+QEI_HandleTypeDef hqei_left;
+QEI_HandleTypeDef hqei_right;
+
+int enc_left = 0, enc_right = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -66,7 +89,96 @@ static void MX_USART2_UART_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+int _write(int file, char *ptr, int len) {
+	HAL_UART_Transmit(&huart2, (uint8_t*) ptr, len, 10);
+	return len;
+}
 
+void MoveRightMotor(const float v) {
+	float s = v;
+	s = s > 1.0 ? 1.0 : s;
+	s = s < -1.0 ? -1.0 : s;
+
+	if (s > 0) {
+		__HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, 0); // 右側 反転
+		__HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_2, s * PRESCALER); // 右側 正転
+	} else if (s < 0) {
+		__HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, - s * PRESCALER); // 右側 反転
+		__HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_2, 0); // 右側 正転
+	} else {
+		__HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, 0); // 右側 反転
+		__HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_2, 0); // 右側 正転
+	}
+}
+
+void MoveLeftMotor(const float v) {
+	float s = v;
+	s = s > 1.0 ? 1.0 : s;
+	s = s < -1.0 ? -1.0 : s;
+
+	if (s > 0) {
+		__HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_2, s * PRESCALER); // 左側 正転
+		__HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_4, 0); // 左側 反転
+	} else if (s < 0) {
+		__HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_2, 0); // 左側 正転
+		__HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_4, - s * PRESCALER); // 左側 反転
+	} else {
+		__HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_2, 0); // 左側 正転
+		__HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_4, 0); // 左側 反転
+	}
+}
+
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
+	if (GPIO_Pin == QEI_L_A_Pin || GPIO_Pin == QEI_L_B_Pin) {
+		QEI_Encode(&hqei_left);
+	}
+	if (GPIO_Pin == QEI_R_A_Pin || GPIO_Pin == QEI_R_B_Pin) {
+		QEI_Encode(&hqei_right);
+	}
+
+}
+
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
+	if (htim == &htim6) {
+		if (start) {
+
+			HAL_ADC_Start(&hadc1);
+			if (HAL_ADC_PollForConversion(&hadc1, 10) == HAL_OK) {
+				ad = HAL_ADC_GetValue(&hadc1); // 10bit
+			}
+			HAL_ADC_Stop(&hadc1);
+
+//			printf("%d\n", ad);
+
+			enc_left += -QEI_GetPulses(&hqei_left);
+			QEI_Reset(&hqei_left);
+			enc_right += QEI_GetPulses(&hqei_right);
+			QEI_Reset(&hqei_right);
+
+//			e = THETA_REF - theta;
+//			ed = (e - e_pre) / DT;
+//			ei = (e + e_pre) * DT / 2;
+//			e_pre = e;
+//			v_ref = e * KP + ed * ed + ei * KI;
+
+			theta = -(THETA_REF - (float)(ad - zero_ad) * ADV_TO_RAD); // nopp_dev version
+			dtheta = (theta - theta_pre) / DT;
+			theta_pre = theta;
+
+			x = -((float)(enc_left + enc_right) / 2) * PULSE_TO_METER;
+			dx = (x - x_pre) / DT;
+			x_pre = x;
+//			printf("Pos: %f, Theta: %f\n", x, theta);
+
+			v_ref = -10.0000*x - 2.3419*dx - 528.4942*theta - 66.8335*dtheta;
+
+			duty_ratio = v_ref / MAX_V;
+
+			MoveRightMotor(duty_ratio);
+			MoveLeftMotor(duty_ratio);
+		}
+	}
+}
 /* USER CODE END 0 */
 
 /**
@@ -77,7 +189,7 @@ int main(void)
 {
 
   /* USER CODE BEGIN 1 */
-
+  setbuf(stdout, NULL);
   /* USER CODE END 1 */
 
   /* MCU Configuration--------------------------------------------------------*/
@@ -104,26 +216,47 @@ int main(void)
   MX_TIM6_Init();
   MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
+  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, 0); // 右側 反転
+  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_2, 0); // 右側 正転
+  __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_2, 0); // 左側 正転
+  __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_4, 0); // 左側 反転
+  HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);
+  HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_2);
+  HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_2);
+  HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_4);
 
+  HAL_TIM_Base_Start_IT(&htim6);
+
+  QEI_Init(&hqei_left,
+  QEI_L_A_GPIO_Port, QEI_L_A_Pin,
+  QEI_L_B_GPIO_Port, QEI_L_B_Pin, 48, QEI_X4_ENCODING);
+  QEI_Init(&hqei_right,
+  QEI_R_A_GPIO_Port, QEI_R_A_Pin,
+  QEI_R_B_GPIO_Port, QEI_R_B_Pin, 48, QEI_X4_ENCODING);
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
+    HAL_GPIO_TogglePin(LED_GPIO_Port, LED_Pin);
+    HAL_Delay(100);
+
+    if (!start && HAL_GPIO_ReadPin(Button_R_GPIO_Port, Button_R_Pin)
+        == GPIO_PIN_RESET) {
+      for (int i = 0; i < 10; i++) {
+        HAL_ADC_Start(&hadc1);
+        if (HAL_ADC_PollForConversion(&hadc1, 10) == HAL_OK) {
+          zero_ad = HAL_ADC_GetValue(&hadc1); // 10bit
+        }
+        HAL_ADC_Stop(&hadc1);
+      }
+      start = true;
+        }
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    HAL_GPIO_WritePin(GPIOA, GPIO_PIN_3, GPIO_PIN_SET);
-    HAL_GPIO_WritePin(GPIOA, GPIO_PIN_1, GPIO_PIN_RESET);
-    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_5, GPIO_PIN_RESET);
-    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_4, GPIO_PIN_SET);
-    HAL_Delay(5000);
-    HAL_GPIO_WritePin(GPIOA, GPIO_PIN_3, GPIO_PIN_RESET);
-    HAL_GPIO_WritePin(GPIOA, GPIO_PIN_1, GPIO_PIN_SET);
-    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_5, GPIO_PIN_SET);
-    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_4, GPIO_PIN_RESET);
-    HAL_Delay(5000);
+
   }
   /* USER CODE END 3 */
 }
@@ -146,7 +279,7 @@ void SystemClock_Config(void)
   RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
   RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI;
-  RCC_OscInitStruct.PLL.PLLMUL = RCC_PLL_MUL2;
+  RCC_OscInitStruct.PLL.PLLMUL = RCC_PLL_MUL4;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
   {
     Error_Handler();
